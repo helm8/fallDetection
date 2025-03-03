@@ -117,10 +117,10 @@ static esp_err_t sensor_register_write_byte(i2c_master_dev_handle_t dev_handle, 
 static void sensor_init(i2c_master_dev_handle_t dev_handle) {
 	uint8_t read_data[2];
 	struct bmi2_dev bmi;
-	struct bmi2_sens_data sensor_data = { { 0 } };
+	//struct bmi2_sens_data sensor_data = { { 0 } };
 	uint8_t rslt;
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, 0x0, read_data, 1));
-	rslt = bmi2_interface_init(&bmi, BMI2_I2C_INTF);
+	//rslt = bmi2_interface_init(&bmi, BMI2_I2C_INTF);
 	//bmi270_init(&bmi);
 
 	
