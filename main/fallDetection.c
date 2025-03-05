@@ -7,6 +7,7 @@
 //#include "bmi270_config.h"
 #include "bmi270.c"
 #include "sdkconfig.h"
+#include "rom/ets_sys.h"
 extern const uint8_t bmi_config_file[];
 
 static gpio_num_t GPIO_FALL_DET = GPIO_NUM_0;
@@ -116,32 +117,44 @@ static esp_err_t sensor_register_write_byte(i2c_master_dev_handle_t dev_handle, 
 
 static void sensor_init(i2c_master_dev_handle_t dev_handle) {
 	uint8_t read_data[2];
-	struct bmi2_dev bmi;
-	//struct bmi2_sens_data sensor_data = { { 0 } };
-	uint8_t rslt;
-	ESP_ERROR_CHECK(sensor_register_read(dev_handle, 0x0, read_data, 1));
-	//rslt = bmi2_interface_init(&bmi, BMI2_I2C_INTF);
-	//bmi270_init(&bmi);
-
 	
+	// Read CHIP_ID register to verify connection with device	
+	ESP_ERROR_CHECK(sensor_register_read(dev_handle, 0x0, read_data, 1));	
 	if (read_data[0] == 0x24) {
 		printf("Communication with BMI270 successful!\n");
 	} else {
 		printf("Communication with BMI270 not verified, received byte: %X\n", read_data[0]);
 	}
 	
+	// Write 0 to PWR_CONF register to disable advanced power save mode
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, 0x7C, 0x0));
-	vTaskDelay(1 / portTICK_PERIOD_MS);
+	ets_delay_us(450);
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_INIT_CTRL_ADDR, 0x0));
 	
+	// Read INT_STATUS register to verify it is ready to configure (should read 0x0)
+	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INTERNAL_STATUS_ADDR, read_data, 1));
+	printf("Initial status: 0x%X\n", read_data[0]);
 
+	// Write each byte from the configuration file to the INIT_DATA register
+	/*
 	for (int i = 0; i < sizeof(bmi270_config_file); i++) {
 		ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_INIT_DATA_ADDR, bmi270_config_file[i]));
-		//printf("Configuration Byte %d: %X\n", i, bmi270_config_file[i]);
-	}
-	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_INIT_CTRL_ADDR, 0x1));
-	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INTERNAL_STATUS_ADDR, read_data, 1));
+		printf("Configuration Byte %d: %X\n", i, bmi270_config_file[i]);
+		//ets_delay_us(450);
+	}*/
+	ESP_ERROR_CHECK(i2c_master_transmit(dev_handle, bmi270_config_file, 1/*sizeof(bmi270_config_file)*/, -1));
 
+	// Read last byte in the INIT_DATA register (for debugging)
+	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INIT_DATA_ADDR, read_data, 1));
+	printf("Last byte in init_data regsiter: 0x%X\n", read_data[0]);
+
+	// Writes to INIT_CTRL register
+	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_INIT_CTRL_ADDR, 0x1));
+	
+
+	ets_delay_us(20000);	
+	// Reads INT_STATUS register to verify configuration is good (should read 0x1)
+	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INTERNAL_STATUS_ADDR, read_data, 1));
 	if ((read_data[0] & 0x1) == 0x1) {
 		printf("BMI270 initialized successfully!\n");
 	} else {
@@ -149,6 +162,18 @@ static void sensor_init(i2c_master_dev_handle_t dev_handle) {
 	}
 	//printf("Total size of config file: %d\n", sizeof(bmi270_config_file));
 }
+
+
+// This function is an alternative to the other sensor_init() using the API in BMI270.c (WIP)
+/*
+static void sensor_init_with_api(i2c_master_dev_handle_t dev_handle) {
+	uint8_t read_data[2];
+	struct bmi2_dev bmi;
+	uint8_t rslt;
+	uint8_t sensor_list[2] = {BMI2_ACCEL, BMI2_GYRO};
+	rslt = bmi2_interface_init(&bmi, BMI2_I2C_INTF);
+	
+}*/
 
 void app_main(void) {
 	i2c_master_bus_handle_t bus_handle;
