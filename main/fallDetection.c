@@ -8,6 +8,7 @@
 #include "bmi270.c"
 #include "sdkconfig.h"
 #include "rom/ets_sys.h"
+#include "esp_heap_caps.h"
 extern const uint8_t bmi_config_file[];
 
 static gpio_num_t GPIO_FALL_DET = GPIO_NUM_0;
@@ -104,9 +105,11 @@ static void IRAM_ATTR button_poll_timer_callback(void *arg) {
 
 static void poll_sensor_data(i2c_master_dev_handle_t dev_handle) {
 	uint8_t read_data[2];
+	int accelerometer_value;
 	//read_data[0] = 8;
-	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_ACC_X_LSB_ADDR, read_data, 1));
-	printf("Accelerometer Data: %d\n", read_data[0]);
+	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_ACC_X_LSB_ADDR, read_data, 2));
+	accelerometer_value = (read_data[1] << 4) | read_data[0];
+	printf("Accelerometer Data: %d\n", accelerometer_value);
 	//printf("'dev_handle = 0x%X\n'", **dev_handle);
 }
 
@@ -232,6 +235,7 @@ static void sensor_timer_init(i2c_master_dev_handle_t *dev_handle) {
 void app_main(void) {
 	i2c_master_bus_handle_t bus_handle;
 	i2c_master_dev_handle_t dev_handle;
+	size_t free_data_size;
 	configure_led();
 	gpio_set_level(GPIO_BTH_STS, 1);
 	gpio_set_level(GPIO_FALL_DET, 1);
@@ -244,6 +248,8 @@ void app_main(void) {
 	timer_init();
 	sensor_timer_init(&dev_handle);
 	gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
+	free_data_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+	printf("Number of bytes of memory available for sensor data: %d\n", free_data_size);
 	while (1) {
 		if (current_state == IDLE_STATE) {
 			gpio_set_level(GPIO_SPK_CTRL, 0);
