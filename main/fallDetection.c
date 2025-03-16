@@ -105,17 +105,17 @@ static void IRAM_ATTR button_poll_timer_callback(void *arg) {
 
 static void poll_sensor_data(i2c_master_dev_handle_t dev_handle) {
 	uint8_t read_data[12];
-	int acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z;
-	/*
+	int8_t acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z;
+	
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_ACC_X_LSB_ADDR, read_data, 12));
-	acc_x = (read_data[1] << 4) | read_data[0];
-	acc_y = (read_data[3] << 4) | read_data[2];
-	acc_z = (read_data[5] << 4) | read_data[4];
-	gyr_x = (read_data[7] << 4) | read_data[6];
-	gyr_y = (read_data[9] << 4) | read_data[8];
-	gyr_z = (read_data[11] << 4) | read_data[12];
+	acc_x = (read_data[1] << 8) | read_data[0];
+	acc_y = (read_data[3] << 8) | read_data[2];
+	acc_z = (read_data[5] << 8) | read_data[4];
+	gyr_x = (read_data[7] << 8) | read_data[6];
+	gyr_y = (read_data[9] << 8) | read_data[8];
+	gyr_z = (read_data[11] << 8) | read_data[12];
 	printf("Accelerometer Data: (%d, %d, %d) | Gyroscope Data: (%d, %d, %d)\n", acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z);
-	*/
+	
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INT_STATUS_0_ADDR, read_data, 1));
 	if (read_data[0] & 0x1) {
 		printf("Significant Motion Detected!\n");
@@ -230,7 +230,7 @@ static void sensor_init(i2c_master_dev_handle_t dev_handle) {
 	
 	//Write to PWR_CTRL register to enable accel/gyro
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_PWR_CTRL_ADDR, 0x06));
-	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_ACC_CONF_ADDR, 0xA6));
+	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_ACC_CONF_ADDR, 0x77));
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_GYR_CONF_ADDR, 0x26));
 	ets_delay_us(20000);	
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_FEAT_PAGE_ADDR, 0x2));
