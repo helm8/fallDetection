@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include <string.h>
 
+
 #define DEVICE_NAME "ESP32_C3_BLE"
 #define SERVICE_UUID 0x00FF
 #define CHAR_UUID    0xFF01
