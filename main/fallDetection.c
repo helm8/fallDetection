@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -21,6 +22,21 @@ static gpio_num_t GPIO_I2C_SCL = GPIO_NUM_6;
 static uint32_t I2C_TIMEOUT_MS = 1000;
 static int bluetoothStatus = 0;
 
+struct SensorData { // A Circular linked list for storing sensor data
+	int16_t acc_x;
+	int16_t acc_y;
+	int16_t acc_z;
+	int16_t gyr_x;
+	int16_t gyr_y;
+	int16_t gyr_z;
+	double acc_mag;
+	double gyr_mag;
+	struct SensorData *next_sample;
+};
+
+struct SensorData *data_buffer;
+static int num_samples = 50;
+
 typedef enum {
 	IDLE_STATE, // normal state -poll buttons and sensor
 	ERROR_STATE, // display error and wait for reset
@@ -30,6 +46,94 @@ typedef enum {
 } state_t;
 
 static state_t current_state = CONFIGURATION_STATE;
+
+
+static void clear_data_sample(struct SensorData *data_sample, uint8_t test_val) {
+	data_sample->acc_x = test_val;
+	data_sample->acc_y = 0;
+	data_sample->acc_z = 0;
+	data_sample->gyr_x = 0;
+	data_sample->gyr_y = 0;
+	data_sample->gyr_z = 0;
+	data_sample->acc_mag = 0;
+	data_sample->gyr_mag = 0;
+}
+
+static void init_data_buffer(void) {
+	data_buffer = (struct SensorData *) malloc(sizeof(struct SensorData));
+	clear_data_sample(data_buffer, 0x0);
+	struct SensorData *new_sample;
+	struct SensorData *first_sample = data_buffer;
+	for (int i = 1; i < num_samples; i++) {
+		new_sample = (struct SensorData *) malloc(sizeof(struct SensorData));
+		clear_data_sample(new_sample, i);
+		data_buffer->next_sample = new_sample;
+		data_buffer = new_sample;
+	}
+	data_buffer->next_sample = first_sample;
+	data_buffer = data_buffer->next_sample;
+}
+
+static void print_data_buffer(void) {
+	printf("Printing Data Buffer...\n");
+	for (int i = 0; i < num_samples; i++) {
+		printf("	Sample %.2d: Acc: (%.5d, %.5d, %.5d), Gyr: (%.5d, %.5d, %.5d), AccMag: %.2f, GyrMag: %.2f\n", i, data_buffer->acc_x, data_buffer->acc_y, data_buffer->acc_z, data_buffer->gyr_x, data_buffer->gyr_y, data_buffer->gyr_z, data_buffer->acc_mag, data_buffer->gyr_mag);
+		if ((data_buffer->gyr_mag > 10000) && (data_buffer->next_sample->gyr_mag > 10000) && (data_buffer->next_sample->next_sample->gyr_mag > 10000)) {
+			printf("Fall Detected!\n");
+		}
+		data_buffer = data_buffer->next_sample;
+	}
+	printf("... Printing Done!\n");
+}
+
+static void IRAM_ATTR alarm_timer_callback(void *arg) {
+	if (current_state == ALARM_STATE) {
+		current_state = FALL_STATE;
+	}
+}
+
+static void alarm_timer_set(unsigned char set) {
+	const esp_timer_create_args_t alarm_timer_args = {
+		.callback = alarm_timer_callback,
+		.name = "alarm_timer"
+	};
+	esp_timer_handle_t alarm_timer;
+	if (set) {
+		ESP_ERROR_CHECK(esp_timer_create(&alarm_timer_args, &alarm_timer));
+		if (esp_timer_is_active(alarm_timer)) {
+			ESP_ERROR_CHECK(esp_timer_restart(alarm_timer, 5000*1000));
+		} else {
+			ESP_ERROR_CHECK(esp_timer_start_once(alarm_timer, 5000*1000));
+		}
+	} else {
+		if (esp_timer_is_active(alarm_timer)) {	
+			ESP_ERROR_CHECK(esp_timer_stop(alarm_timer));
+		}
+	}
+}
+
+static void check_fall(void) {
+	uint16_t count;
+	uint16_t thres = 10000;
+	count = 0;
+	for (int i = 0; i < num_samples; i++) {
+		if (data_buffer->gyr_mag > thres) {
+			count++;
+		} else {
+			count = 0;
+		}
+
+		if (count > 3) {
+			printf("Fall Detected!!\n");
+			if (current_state == IDLE_STATE) {
+				current_state = ALARM_STATE;
+				alarm_timer_set(1);
+			}
+			return;
+		}
+		data_buffer = data_buffer->next_sample;
+	}
+}
 
 static void i2c_init(i2c_master_bus_handle_t *bus_handle, i2c_master_dev_handle_t *dev_handle) {
 	printf("Initializing I2C Bus!\n");
@@ -60,21 +164,6 @@ static esp_err_t sensor_register_write_byte(i2c_master_dev_handle_t dev_handle, 
 	return i2c_master_transmit(dev_handle, write_buf, sizeof(write_buf), I2C_TIMEOUT_MS / portTICK_PERIOD_MS);
 }
 
-static void IRAM_ATTR alarm_timer_callback(void *arg) {
-	if (current_state == ALARM_STATE) {
-		current_state = FALL_STATE;
-	}
-}
-
-static void alarm_timer_init(void) {
-	const esp_timer_create_args_t alarm_timer_args = {
-		.callback = alarm_timer_callback,
-		.name = "alarm_timer"
-	};
-	esp_timer_handle_t alarm_timer;
-	ESP_ERROR_CHECK(esp_timer_create(&alarm_timer_args, &alarm_timer));
-	ESP_ERROR_CHECK(esp_timer_start_once(alarm_timer, 5000*1000));
-}
 
 static void configure_led(void) {
 	printf("Configuring LED!\n");
@@ -95,9 +184,10 @@ static void IRAM_ATTR button_poll_timer_callback(void *arg) {
 		//gpio_set_level(GPIO_FALL_DET, fallDetected);
 		if (current_state == IDLE_STATE) {
 			current_state = ALARM_STATE;
-			alarm_timer_init();
+			alarm_timer_set(1);
 		} else if (current_state == ALARM_STATE) {
 			current_state = IDLE_STATE;
+			alarm_timer_set(0);
 		}
 	}
 	prev_button_state = button_state;
@@ -105,17 +195,37 @@ static void IRAM_ATTR button_poll_timer_callback(void *arg) {
 
 static void poll_sensor_data(i2c_master_dev_handle_t dev_handle) {
 	uint8_t read_data[12];
-	int8_t acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z;
+	//int16_t acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z;
+	static int count = 0;
+	uint32_t intermediate;
 	
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_ACC_X_LSB_ADDR, read_data, 12));
-	acc_x = (read_data[1] << 8) | read_data[0];
-	acc_y = (read_data[3] << 8) | read_data[2];
-	acc_z = (read_data[5] << 8) | read_data[4];
-	gyr_x = (read_data[7] << 8) | read_data[6];
-	gyr_y = (read_data[9] << 8) | read_data[8];
-	gyr_z = (read_data[11] << 8) | read_data[12];
-	printf("Accelerometer Data: (%d, %d, %d) | Gyroscope Data: (%d, %d, %d)\n", acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z);
+	data_buffer->acc_x = (read_data[1] << 8) | read_data[0];
+	//acc_y = (read_data[3] << 8) | read_data[2];
+	data_buffer->acc_y = (read_data[3] << 8) | read_data[2];
+	data_buffer->acc_z = (read_data[5] << 8) | read_data[4];
+	data_buffer->gyr_x = (read_data[7] << 8) | read_data[6];
+	data_buffer->gyr_y = (read_data[9] << 8) | read_data[8];
+	data_buffer->gyr_z = (read_data[11] << 8) | read_data[12];
+	intermediate = pow(data_buffer->acc_x, 2) + pow(data_buffer->acc_y, 2) + pow(data_buffer->acc_z, 2);
+	data_buffer->acc_mag = sqrt(intermediate);
+	intermediate = pow(data_buffer->gyr_x, 2) + pow(data_buffer->gyr_y, 2) + pow(data_buffer->gyr_z, 2);
+	data_buffer->gyr_mag = sqrt(intermediate);
+
+	// For testing
+	printf("Accelerometer Data: (%d, %d, %d), Gyroscope Data: (%d, %d, %d), Acc_mag = %.2f, Gyr_mag = %.2f\n", data_buffer->acc_x, data_buffer->acc_y, data_buffer->acc_z, data_buffer->gyr_x, data_buffer->gyr_y, data_buffer->gyr_z, data_buffer->acc_mag, data_buffer->gyr_mag);
 	
+	data_buffer = data_buffer->next_sample;
+	
+	if (count < 50) {
+		count++;
+	} else {
+		count = 0;
+		//print_data_buffer();
+		check_fall();
+	}
+	
+	// This part does not work yet, never receives interrupt signal
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_INT_STATUS_0_ADDR, read_data, 1));
 	if (read_data[0] & 0x1) {
 		printf("Significant Motion Detected!\n");
@@ -253,6 +363,8 @@ void app_main(void) {
 	i2c_master_bus_handle_t bus_handle;
 	i2c_master_dev_handle_t dev_handle;
 	size_t free_data_size;
+	init_data_buffer();
+	print_data_buffer();
 	configure_led();
 	gpio_set_level(GPIO_BTH_STS, 1);
 	gpio_set_level(GPIO_FALL_DET, 1);
@@ -267,6 +379,11 @@ void app_main(void) {
 	gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
 	free_data_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
 	printf("Number of bytes of memory available for sensor data: %d\n", free_data_size);
+
+	// For testing
+	printf("Recording Sensor Data...\n");
+	//vTaskDelay(3000 / portTICK_PERIOD_MS);
+	//print_data_buffer();
 	while (1) {
 		if (current_state == IDLE_STATE) {
 			gpio_set_level(GPIO_SPK_CTRL, 0);
