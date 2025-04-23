@@ -4,6 +4,7 @@ import re
 import sys
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Button
 
 time = [0]
 acc_x, acc_y, acc_z = [], [], []
@@ -13,15 +14,30 @@ data_file = None
 axes = []
 fall_timestamps = []
 plot_lines = {}
+is_paused = False
+button = None
+
 
 
 INPUT_REGEX = re.compile(r"Accelerometer Data: \((?P<acc_x>-?\d+), (?P<acc_y>-?\d+), (?P<acc_z>-?\d+)\), "
                          r"Gyroscope Data: \((?P<gyr_x>-?\d+), (?P<gyr_y>-?\d+), (?P<gyr_z>-?\d+)\), "
                          r"Acc_mag = (?P<acc_mag>\d+\.\d+), Gyr_mag = (?P<gyr_mag>\d+\.\d+)")
 
+def toggle_pause(event):
+    global is_paused
+    if (is_paused):
+        is_paused = False
+        button.label.set_text('Pause')
+    else:
+        is_paused = True
+        button.label.set_text('Play')
+
+
 def update(frame):
-    global data_file, axes, plot_lines, fall_timestamps
+    global data_file, axes, plot_lines, fall_timestamps, is_paused
     while True:
+        if (is_paused):
+            return
         pos = data_file.tell()
         line = data_file.readline()
         if not line:
@@ -53,7 +69,7 @@ def update(frame):
                 ax.autoscale_view()
 
 def main():
-    global data_file, axes, plot_lines
+    global data_file, axes, plot_lines, button
     try:
         data_file = open("./tmp.txt", "r")
         while True:
@@ -68,6 +84,10 @@ def main():
 
         fig, axes1 = plt.subplots(4, 1, sharex=True, figsize = (14, 10))
         axes = axes1
+        plt.subplots_adjust(bottom = 0.2, hspace = 0.5)
+        ax_button = plt.axes([0.81, 0.05, 0.1, 0.075])
+        button = Button(ax_button, 'Pause')
+        button.on_clicked(toggle_pause)
         
         plot_lines['acc_x'], = axes[0].plot([], [], label="Acc X")
         plot_lines['acc_y'], = axes[0].plot([], [], label="Acc Y")
@@ -112,6 +132,7 @@ def parse_line(line):
         return True
     else:
         return False
+
 
 if __name__ == "__main__":
     main() 

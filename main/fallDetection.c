@@ -11,6 +11,10 @@
 #include "rom/ets_sys.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "driver/ledc.h"
+
+
+// Bluetooth stuff commented out for now
 
 #include "nvs_flash.h"
 #include "esp_bt.h"
@@ -19,9 +23,6 @@
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include <string.h>
-
-
-
 
 #define DEVICE_NAME "ESP32_C3_BLE"
 #define SERVICE_UUID 0x00FF
@@ -112,7 +113,7 @@ static state_t current_state = CONFIGURATION_STATE;
 
 
 
-
+// Bluetooth stuff commented out for now
 
 // --- GAP Callback ---
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
@@ -330,7 +331,7 @@ static void alarm_timer_set(unsigned char set) {
 
 static void check_fall(void) {
 	uint16_t count;
-	uint16_t thres = 10000;
+	uint16_t thres = 30000;
 	count = 0;
 	for (int i = 0; i < num_samples; i++) {
 		if (data_buffer->gyr_mag > thres) {
@@ -389,6 +390,45 @@ static void configure_led(void) {
 	gpio_set_direction(GPIO_FALL_DET, GPIO_MODE_OUTPUT);
 	gpio_set_direction(GPIO_BTH_STS, GPIO_MODE_OUTPUT);
 	gpio_set_direction(GPIO_SPK_CTRL, GPIO_MODE_OUTPUT);
+
+	ledc_timer_config_t spk_pwm_timer = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.duty_resolution = LEDC_TIMER_7_BIT,
+		.timer_num = LEDC_TIMER_0,
+		.freq_hz = 5000,
+		.clk_cfg = LEDC_USE_XTAL_CLK
+	};
+	ESP_ERROR_CHECK(ledc_timer_config(&spk_pwm_timer));
+/*
+	ledc_timer_config_t fall_pwm_timer = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.duty_resolution = LEDC_TIMER_7_BIT,
+		.timer_num = LEDC_TIMER_1,
+		.freq_hz = 400,
+		.clk_cfg = LEDC_USE_XTAL_CLK
+	};
+	ESP_ERROR_CHECK(ledc_timer_config(&fall_pwm_timer));
+*/
+	ledc_channel_config_t spk_pwm_channel = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_0,
+		.timer_sel = LEDC_TIMER_0,
+		.intr_type = LEDC_INTR_DISABLE,
+		.gpio_num = GPIO_SPK_CTRL,
+		.duty = 64
+	};
+	ESP_ERROR_CHECK(ledc_channel_config(&spk_pwm_channel));
+/*
+	ledc_channel_config_t fall_pwm_channel = {
+		.speed_mode = LEDC_LOW_SPEED_MODE,
+		.channel = LEDC_CHANNEL_1, 
+		.timer_sel = LEDC_TIMER_1,
+		.intr_type = LEDC_INTR_DISABLE,
+		.gpio_num = GPIO_FALL_DET,
+		.duty = 64
+	};
+	ESP_ERROR_CHECK(ledc_channel_config(&fall_pwm_channel));
+*/
 }
 
 static void IRAM_ATTR button_poll_timer_callback(void *arg) {	
@@ -416,13 +456,12 @@ static void poll_sensor_data(i2c_master_dev_handle_t dev_handle) {
 	uint32_t intermediate;
 	
 	ESP_ERROR_CHECK(sensor_register_read(dev_handle, BMI2_ACC_X_LSB_ADDR, read_data, 12));
-	data_buffer->acc_x = (read_data[1] << 8) | read_data[0];
-	//acc_y = (read_data[3] << 8) | read_data[2];
-	data_buffer->acc_y = (read_data[3] << 8) | read_data[2];
-	data_buffer->acc_z = (read_data[5] << 8) | read_data[4];
-	data_buffer->gyr_x = (read_data[7] << 8) | read_data[6];
-	data_buffer->gyr_y = (read_data[9] << 8) | read_data[8];
-	data_buffer->gyr_z = (read_data[11] << 8) | read_data[10];
+	data_buffer->gyr_x = (read_data[1] << 8) | read_data[0];
+	data_buffer->gyr_y = (read_data[3] << 8) | read_data[2];
+	data_buffer->gyr_z = (read_data[5] << 8) | read_data[4];
+	data_buffer->acc_x = (read_data[7] << 8) | read_data[6];
+	data_buffer->acc_y = (read_data[9] << 8) | read_data[8];
+	data_buffer->acc_z = (read_data[11] << 8) | read_data[10];
 	intermediate = pow(data_buffer->acc_x, 2) + pow(data_buffer->acc_y, 2) + pow(data_buffer->acc_z, 2);
 	data_buffer->acc_mag = sqrt(intermediate);
 	intermediate = pow(data_buffer->gyr_x, 2) + pow(data_buffer->gyr_y, 2) + pow(data_buffer->gyr_z, 2);
@@ -556,8 +595,8 @@ static void sensor_init(i2c_master_dev_handle_t dev_handle) {
 	
 	//Write to PWR_CTRL register to enable accel/gyro
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_PWR_CTRL_ADDR, 0x06));
-	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_ACC_CONF_ADDR, 0x77));
-	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_GYR_CONF_ADDR, 0x26));
+	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_ACC_CONF_ADDR, 0x37));
+	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_GYR_CONF_ADDR, 0x36));
 	ets_delay_us(20000);	
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, BMI2_FEAT_PAGE_ADDR, 0x2));
 	ESP_ERROR_CHECK(sensor_register_write_byte(dev_handle, 0x34, 0x2A));
@@ -589,6 +628,7 @@ void app_main(void) {
 	i2c_init(&bus_handle, &dev_handle);
 	sensor_init(dev_handle);
 	
+	// Bluetooth stuff commented out for now
 	
 	esp_err_t ret = nvs_flash_init();
     	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -609,14 +649,14 @@ void app_main(void) {
     	ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 
     	// Create a task that simulates fall detection events.
-    	xTaskCreate(fall_detection_task, "fall_detection_task", 4096, NULL, 5, NULL);
+    	//xTaskCreate(fall_detection_task, "fall_detection_task", 4096, NULL, 5, NULL);
 	
 	
 	gpio_set_level(GPIO_BTH_STS, 0);
 	gpio_set_level(GPIO_FALL_DET, 0);
 	timer_init();
 	sensor_timer_init(&dev_handle);
-	gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
+	//gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
 	free_data_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
 	printf("Number of bytes of memory available for sensor data: %d\n", free_data_size);
 
@@ -626,15 +666,18 @@ void app_main(void) {
 	//print_data_buffer();
 	while (1) {
 		if (current_state == IDLE_STATE) {
+			ESP_ERROR_CHECK(ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0));
 			gpio_set_level(GPIO_SPK_CTRL, 0);
 			gpio_set_level(GPIO_FALL_DET, 0);
 		} else if (current_state == ALARM_STATE) {
+			ESP_ERROR_CHECK(ledc_timer_resume(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0));
 			gpio_set_level(GPIO_SPK_CTRL, 1);
 			gpio_set_level(GPIO_FALL_DET, 0);
 			vTaskDelay(100 / portTICK_PERIOD_MS);
 			gpio_set_level(GPIO_FALL_DET, 1);
 			vTaskDelay(100 / portTICK_PERIOD_MS);
 		} else if (current_state == FALL_STATE) {
+			ESP_ERROR_CHECK(ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0));
 			gpio_set_level(GPIO_SPK_CTRL, 0);
 			gpio_set_level(GPIO_FALL_DET, 1);
 		}

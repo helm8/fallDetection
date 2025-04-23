@@ -3,4 +3,5 @@ idf_component_register(SRCS "fallDetection.c"
 		    REQUIRES esp_driver_gpio
 		    REQUIRES esp_driver_i2c
 		    REQUIRES bt
-		    REQUIRES nvs_flash)	    
+		    REQUIRES nvs_flash
+		    REQUIRES esp_driver_ledc)
