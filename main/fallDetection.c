@@ -21,12 +21,14 @@
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
+#include "esp_gatt_defs.h"
 #include "esp_log.h"
 #include <string.h>
 
 #define DEVICE_NAME "ESP32_C3_BLE"
 #define SERVICE_UUID 0x00FF
 #define CHAR_UUID    0xFF01
+static const uint16_t CLIENT_CHAR_CFG_UUID = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
 static const char *TAG = "BLE_GATT";
 
@@ -115,7 +117,7 @@ static state_t current_state = CONFIGURATION_STATE;
 
 // Bluetooth stuff commented out for now
 
-// --- GAP Callback ---
+// GAP Event Handler
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
     switch (event) {
         case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
@@ -133,24 +135,16 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+// GATTS Event Handler
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t *param) {
     switch (event) {
         case ESP_GATTS_REG_EVT: {
             ESP_LOGI(TAG, "GATT Server Registered, app_id %d", param->reg.app_id);
-            // Set device name and configure advertisement data
             esp_ble_gap_set_device_name(DEVICE_NAME);
             esp_ble_gap_config_adv_data(&adv_data);
-
-            // Create a primary service with a 16-bit UUID (SERVICE_UUID)
             esp_gatt_srvc_id_t service_id = {
-                .id = {
-                    .inst_id = 0,
-                    .uuid = {
-                        .len = ESP_UUID_LEN_16,
-                        .uuid.uuid16 = SERVICE_UUID,
-                    },
-                },
+                .id = {.inst_id = 0, .uuid = {.len = ESP_UUID_LEN_16, .uuid.uuid16 = SERVICE_UUID}},
                 .is_primary = true,
             };
             esp_ble_gatts_create_service(gatts_if, &service_id, HANDLE_MAX);
@@ -159,54 +153,58 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
         case ESP_GATTS_CREATE_EVT: {
             ESP_LOGI(TAG, "Service created, handle %d", param->create.service_handle);
             gatt_handles[HANDLE_SERVICE] = param->create.service_handle;
-            // Define the characteristic properties: read, write, and notify.
+            esp_bt_uuid_t char_uuid = {.len = ESP_UUID_LEN_16, .uuid.uuid16 = CHAR_UUID};
             esp_gatt_char_prop_t char_prop = ESP_GATT_CHAR_PROP_BIT_READ |
                                               ESP_GATT_CHAR_PROP_BIT_WRITE |
                                               ESP_GATT_CHAR_PROP_BIT_NOTIFY;
-
-            esp_bt_uuid_t char_uuid = {
-                .len = ESP_UUID_LEN_16,
-                .uuid = { .uuid16 = CHAR_UUID },
-            };
-
-            // Add the characteristic to the service
-            esp_ble_gatts_add_char(gatt_handles[HANDLE_SERVICE], &char_uuid,
-                                   ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                   char_prop, &char_attr_value, NULL);
+            esp_ble_gatts_add_char(
+                gatt_handles[HANDLE_SERVICE],
+                &char_uuid,
+                ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                char_prop,
+                &char_attr_value,
+                NULL
+            );
             break;
         }
         case ESP_GATTS_ADD_CHAR_EVT: {
             ESP_LOGI(TAG, "Characteristic added, handle %d", param->add_char.attr_handle);
             gatt_handles[HANDLE_CHAR] = param->add_char.attr_handle;
-            // Start the service so that it becomes available for connections
+            // Add CCC Descriptor
+            esp_bt_uuid_t descr_uuid = {.len = ESP_UUID_LEN_16, .uuid.uuid16 = CLIENT_CHAR_CFG_UUID};
+            esp_ble_gatts_add_char_descr(
+                gatt_handles[HANDLE_SERVICE],
+                &descr_uuid,
+                ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                NULL,
+                NULL
+            );
             esp_ble_gatts_start_service(gatt_handles[HANDLE_SERVICE]);
             break;
         }
+        case ESP_GATTS_ADD_CHAR_DESCR_EVT: {
+            ESP_LOGI(TAG, "CCC Descriptor added, handle %d", param->add_char_descr.attr_handle);
+            gatt_handles[HANDLE_CHAR_CFG] = param->add_char_descr.attr_handle;
+            break;
+        }
         case ESP_GATTS_READ_EVT: {
-            ESP_LOGI(TAG, "Characteristic Read, handle %d", param->read.handle);
-            // Prepare response with the current value of the characteristic
             esp_gatt_rsp_t rsp;
-            memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+            memset(&rsp, 0, sizeof(rsp));
             rsp.attr_value.handle = param->read.handle;
-            rsp.attr_value.len = strlen((char*)char_value);
+            rsp.attr_value.len    = strlen((char*)char_value);
             memcpy(rsp.attr_value.value, char_value, rsp.attr_value.len);
             esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
                                         param->read.trans_id, ESP_GATT_OK, &rsp);
             break;
         }
         case ESP_GATTS_WRITE_EVT: {
-            ESP_LOGI(TAG, "Characteristic Write, handle %d, length %d",
-                     param->write.handle, param->write.len);
-            // Update the characteristic's value with the data received from the client
             memcpy(char_value, param->write.value, param->write.len);
-            char_value[param->write.len] = '\0';  // Ensure null termination
-            ESP_LOGI(TAG, "New Value: %s", char_value);
+            char_value[param->write.len] = '\0';
             if (param->write.need_rsp) {
-                // Send a response back to the client
                 esp_gatt_rsp_t rsp;
-                memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+                memset(&rsp, 0, sizeof(rsp));
                 rsp.attr_value.handle = param->write.handle;
-                rsp.attr_value.len = param->write.len;
+                rsp.attr_value.len    = param->write.len;
                 memcpy(rsp.attr_value.value, param->write.value, param->write.len);
                 esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
                                             param->write.trans_id, ESP_GATT_OK, &rsp);
@@ -214,54 +212,18 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             break;
         }
         case ESP_GATTS_CONNECT_EVT: {
-            ESP_LOGI(TAG, "Client Connected, conn_id %d", param->connect.conn_id);
-            // Store the connection information for notifications
-            global_conn_id = param->connect.conn_id;
+            global_conn_id  = param->connect.conn_id;
             global_gatts_if = gatts_if;
             break;
         }
         case ESP_GATTS_DISCONNECT_EVT: {
-            ESP_LOGI(TAG, "Client Disconnected, conn_id %d", param->disconnect.conn_id);
-            // Reset connection info and restart advertising
             global_conn_id = 0;
             esp_ble_gap_start_advertising(&adv_params);
             break;
         }
-        default:
-            break;
+        default: break;
     }
 }
-
-// --- Fall Detection Task ---
-// This task simulates a fall event.
-// In a real scenario, replace this with your actual sensor-based fall detection.
-void fall_detection_task(void *pvParameter) {
-    while (1) {
-        // Simulate waiting time until a fall is detected (e.g., 15 seconds)
-        vTaskDelay(15000 / portTICK_PERIOD_MS);
-
-        // Simulated fall detection:
-        ESP_LOGI(TAG, "Fall detected! Preparing notification...");
-
-        // Update the characteristic value with a special signal string.
-        const char *fall_signal = "FALL_DETECTED";
-        memset(char_value, 0, sizeof(char_value));
-        strncpy((char *)char_value, fall_signal, sizeof(char_value) - 1);
-        
-        // If a client is connected, send a notification.
-        if (global_conn_id != 0 && global_gatts_if != 0) {
-            ESP_LOGI(TAG, "Notifying client of fall event...");
-            // Send notification (false indicates no confirmation required)
-            esp_ble_gatts_send_indicate(global_gatts_if, global_conn_id,
-                                        gatt_handles[HANDLE_CHAR],
-                                        strlen((char*)char_value),
-                                        char_value, false);
-        } else {
-            ESP_LOGW(TAG, "No client connected. Skipping notification.");
-        }
-    }
-}
-
 
 
 
@@ -315,6 +277,7 @@ static void alarm_timer_set(unsigned char set) {
 		.name = "alarm_timer"
 	};
 	esp_timer_handle_t alarm_timer;
+	printf("In the alarm_timer_set function: %d\n", set);	
 	if (set) {
 		ESP_ERROR_CHECK(esp_timer_create(&alarm_timer_args, &alarm_timer));
 		if (esp_timer_is_active(alarm_timer)) {
@@ -327,6 +290,7 @@ static void alarm_timer_set(unsigned char set) {
 			ESP_ERROR_CHECK(esp_timer_stop(alarm_timer));
 		}
 	}
+	
 }
 
 static void check_fall(void) {
@@ -345,6 +309,17 @@ static void check_fall(void) {
 			if (current_state == IDLE_STATE) {
 				current_state = ALARM_STATE;
 				alarm_timer_set(1);
+				if (global_conn_id != 0 && global_gatts_if != 0) {
+					const char *fall_signal = "FALL_DETECTED";
+					esp_ble_gatts_send_indicate(
+						global_gatts_if,
+						global_conn_id,
+						gatt_handles[HANDLE_CHAR],
+						strlen(fall_signal),
+						(uint8_t*)fall_signal,
+						false
+					);
+				}
 			}
 			return;
 		}
@@ -435,7 +410,9 @@ static void IRAM_ATTR button_poll_timer_callback(void *arg) {
 	static int prev_button_state = 1;
 	int button_state;
 	button_state = gpio_get_level(GPIO_BTN_SIG);
-	if (button_state != prev_button_state && !button_state) {
+	//printf("Button Pressed: %d\n", button_state);
+	if (button_state != prev_button_state && button_state) {
+		
 		//fallDetected = !fallDetected;
 		//gpio_set_level(GPIO_FALL_DET, fallDetected);
 		if (current_state == IDLE_STATE) {
@@ -516,7 +493,7 @@ static void configure_inputs(void) {
 	gpio_reset_pin(GPIO_BTN_SIG);
 	gpio_reset_pin(GPIO_INT1);
 	gpio_set_direction(GPIO_BTN_SIG, GPIO_MODE_INPUT);
-	gpio_set_pull_mode(GPIO_BTN_SIG, GPIO_PULLUP_ONLY);
+	gpio_set_pull_mode(GPIO_BTN_SIG, GPIO_PULLDOWN_ONLY);
 	gpio_set_direction(GPIO_INT1, GPIO_MODE_INPUT);
 	gpio_set_pull_mode(GPIO_INT1, GPIO_PULLUP_ONLY);
 }
@@ -656,7 +633,7 @@ void app_main(void) {
 	gpio_set_level(GPIO_FALL_DET, 0);
 	timer_init();
 	sensor_timer_init(&dev_handle);
-	//gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
+	gpio_dump_io_configuration(stdout, 1ULL << 10); // For debugging
 	free_data_size = heap_caps_get_free_size(MALLOC_CAP_8BIT);
 	printf("Number of bytes of memory available for sensor data: %d\n", free_data_size);
 
