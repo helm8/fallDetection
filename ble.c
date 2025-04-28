@@ -16,7 +16,7 @@
 #include "esp_gatt_common_api.h"
 
 #define DEVICE_NAME             "ESP32_C3_BLE"
-#define SERVICE_UUID            0x00FF
+#define SERVICE_UUID            0xFF00
 #define CHAR_UUID               0xFF01
 static const uint16_t CLIENT_CHAR_CFG_UUID = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
@@ -147,6 +147,29 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         conn_id = 0;
         esp_ble_gap_start_advertising(&adv_params);
         break;
+
+    case ESP_GATTS_WRITE_EVT: {
+        auto* w = &param->write;
+        // Did the client write to our CCC descriptor?
+        if (w->handle == handles[IDX_CHAR_CCC] && w->len == 2) {
+            uint16_t cfg = w->value[1] << 8 | w->value[0];
+            if (cfg == 0x0001) {
+                ESP_LOGI(TAG, "Client ENABLED notifications");
+            } else {
+                ESP_LOGI(TAG, "Client DISABLED notifications");
+            }
+            // Send back a success response so the stack knows we accepted it
+            esp_ble_gatts_send_response(
+                gatts_if,
+                w->conn_id,
+                w->trans_id,
+                ESP_GATT_OK,
+                NULL
+            );
+        }
+        break;
+    }
+
 
     default:
         break;
