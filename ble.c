@@ -1,5 +1,3 @@
-// main/main.c
-
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -12,17 +10,17 @@
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
-#include "esp_gatt_defs.h"      // for ESP_GATT_UUID_CHAR_CLIENT_CONFIG
 #include "esp_gatt_common_api.h"
 
-#define DEVICE_NAME             "ESP32_C3_BLE"
-#define SERVICE_UUID            0xFF00
-#define CHAR_UUID               0xFF01
+#define TAG                 "BLE_FALL"
+#define DEVICE_NAME         "ESP32_C3_BLE"
+
+// 16-bit UUIDs
+#define SERVICE_UUID        0xFF00
+#define CHAR_UUID           0xFF01
 static const uint16_t CLIENT_CHAR_CFG_UUID = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
-static const char *TAG = "BLE_TEST";
-
-// attribute handles
+// GATT attribute handles
 enum {
     IDX_SVC,
     IDX_CHAR,
@@ -31,134 +29,124 @@ enum {
     IDX_NB
 };
 static uint16_t handles[IDX_NB];
-
 static uint16_t conn_id = 0;
 static esp_gatt_if_t gatts_if_global = 0;
+static uint16_t ccc_value = 0;  // tracks CCC descriptor writes
 
-// initial char value
-static uint8_t char_value[16] = {0};
-
-static esp_ble_adv_params_t adv_params = {
-    .adv_int_min        = 0x20,
-    .adv_int_max        = 0x40,
-    .adv_type           = ADV_TYPE_IND,
-    .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
-    .channel_map        = ADV_CHNL_ALL,
-    .adv_filter_policy  = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-};
-
+// Advertising data: include 16-bit service UUID
+static uint16_t adv_service_uuid = SERVICE_UUID;
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp        = false,
     .include_name        = true,
     .include_txpower     = true,
+    .service_uuid_len    = sizeof(adv_service_uuid),
+    .p_service_uuid      = (uint8_t*)&adv_service_uuid,
     .flag                = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
+// Advertising parameters (100-150ms interval)
+static esp_ble_adv_params_t adv_params = {
+    .adv_int_min         = 0x00A0,  // 100 ms
+    .adv_int_max         = 0x00F0,  // 150 ms
+    .adv_type            = ADV_TYPE_IND,
+    .own_addr_type       = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map         = ADV_CHNL_ALL,
+    .adv_filter_policy   = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
 
+// GAP event handler: start advertising & retry
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+    switch (event) {
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
         esp_ble_gap_start_advertising(&adv_params);
+        break;
+    case ESP_GAP_BLE_ADV_START_FAILED_EVT:
+        ESP_LOGW(TAG, "Adv start failed, retrying");
+        esp_ble_gap_start_advertising(&adv_params);
+        break;
+    default:
+        break;
     }
 }
 
+// GATT server event handler
 static void gatts_event_handler(esp_gatts_cb_event_t event,
                                 esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t *param)
 {
     switch (event) {
-    case ESP_GATTS_REG_EVT:
-        ESP_LOGI(TAG, "REGISTER_APP, status %d, app_id %d",
-                 param->reg.status, param->reg.app_id);
+    case ESP_GATTS_REG_EVT: {
+        ESP_LOGI(TAG, "REGISTER_APP status=%d app_id=%d", param->reg.status, param->reg.app_id);
         esp_ble_gap_set_device_name(DEVICE_NAME);
         esp_ble_gap_config_adv_data(&adv_data);
 
-        {
-            // create service
-            esp_gatt_srvc_id_t svc_id = {
-                .is_primary = true,
-                .id.inst_id = 0,
-                .id.uuid.len = ESP_UUID_LEN_16,
-                .id.uuid.uuid.uuid16 = SERVICE_UUID
-            };
-            esp_ble_gatts_create_service(gatts_if, &svc_id, IDX_NB);
-        }
+        // Create primary service
+        esp_gatt_srvc_id_t svc_id = {0};
+        svc_id.is_primary = true;
+        svc_id.id.inst_id = 0;
+        svc_id.id.uuid.len = ESP_UUID_LEN_16;
+        svc_id.id.uuid.uuid.uuid16 = SERVICE_UUID;
+        esp_ble_gatts_create_service(gatts_if, &svc_id, IDX_NB);
         break;
-
-    case ESP_GATTS_CREATE_EVT:
-        ESP_LOGI(TAG, "CREATE_SERVICE_EVT, status %d, svc_handle %d",
-                 param->create.status, param->create.service_handle);
+    }
+    case ESP_GATTS_CREATE_EVT: {
+        ESP_LOGI(TAG, "CREATE_SERVICE status=%d handle=%d", param->create.status, param->create.service_handle);
         handles[IDX_SVC] = param->create.service_handle;
 
-        // add characteristic
-        {
-            esp_bt_uuid_t char_uuid = {
-                .len = ESP_UUID_LEN_16,
-                .uuid.uuid16 = CHAR_UUID
-            };
-            esp_ble_gatts_add_char(
-                handles[IDX_SVC],
-                &char_uuid,
-                ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-                NULL,
-                NULL
-            );
-        }
+        // Add characteristic (READ + NOTIFY)
+        esp_bt_uuid_t char_uuid = {0};
+        char_uuid.len = ESP_UUID_LEN_16;
+        char_uuid.uuid.uuid16 = CHAR_UUID;
+        esp_ble_gatts_add_char(
+            handles[IDX_SVC],
+            &char_uuid,
+            ESP_GATT_PERM_READ,
+            ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+            NULL,
+            NULL
+        );
         break;
-
-    case ESP_GATTS_ADD_CHAR_EVT:
-        ESP_LOGI(TAG, "ADD_CHAR_EVT, status %d, attr_handle %d",
-                 param->add_char.status, param->add_char.attr_handle);
+    }
+    case ESP_GATTS_ADD_CHAR_EVT: {
+        ESP_LOGI(TAG, "ADD_CHAR status=%d attr_handle=%d", param->add_char.status, param->add_char.attr_handle);
         handles[IDX_CHAR] = param->add_char.attr_handle;
 
-        // add CCC descriptor (0x2902)
-        {
-            esp_bt_uuid_t descr_uuid = {
-                .len = ESP_UUID_LEN_16,
-                .uuid.uuid16 = CLIENT_CHAR_CFG_UUID
-            };
-            esp_ble_gatts_add_char_descr(
-                handles[IDX_SVC],
-                &descr_uuid,
-                ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                NULL,
-                NULL
-            );
-        }
+        // Add CCC descriptor (0x2902)
+        esp_bt_uuid_t descr_uuid = {0};
+        descr_uuid.len = ESP_UUID_LEN_16;
+        descr_uuid.uuid.uuid16 = CLIENT_CHAR_CFG_UUID;
+        esp_ble_gatts_add_char_descr(
+            handles[IDX_SVC],
+            &descr_uuid,
+            ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+            NULL,
+            NULL
+        );
         break;
-
-    case ESP_GATTS_ADD_CHAR_DESCR_EVT:
-        ESP_LOGI(TAG, "ADD_DESCR_EVT, status %d, attr_handle %d",
-                 param->add_char_descr.status, param->add_char_descr.attr_handle);
+    }
+    case ESP_GATTS_ADD_CHAR_DESCR_EVT: {
+        ESP_LOGI(TAG, "ADD_DESCR status=%d attr_handle=%d", param->add_char_descr.status, param->add_char_descr.attr_handle);
         handles[IDX_CHAR_CCC] = param->add_char_descr.attr_handle;
-
-        // start service & begin advertising
         esp_ble_gatts_start_service(handles[IDX_SVC]);
         break;
-
-    case ESP_GATTS_CONNECT_EVT:
-        ESP_LOGI(TAG, "CONNECT_EVT, conn_id %d, if %d",
-                 param->connect.conn_id, gatts_if);
+    }
+    case ESP_GATTS_CONNECT_EVT: {
+        ESP_LOGI(TAG, "CONNECT conn_id=%d if=%d", param->connect.conn_id, gatts_if);
         conn_id = param->connect.conn_id;
         gatts_if_global = gatts_if;
         break;
-
-    case ESP_GATTS_DISCONNECT_EVT:
-        ESP_LOGI(TAG, "DISCONNECT_EVT, conn_id %d", param->disconnect.conn_id);
+    }
+    case ESP_GATTS_DISCONNECT_EVT: {
+        ESP_LOGI(TAG, "DISCONNECT conn_id=%d", param->disconnect.conn_id);
         conn_id = 0;
+        ccc_value = 0;
         esp_ble_gap_start_advertising(&adv_params);
         break;
-
+    }
     case ESP_GATTS_WRITE_EVT: {
-        auto* w = &param->write;
-        // Did the client write to our CCC descriptor?
+        esp_ble_gatts_cb_param_t *w = &param->write;
         if (w->handle == handles[IDX_CHAR_CCC] && w->len == 2) {
-            uint16_t cfg = w->value[1] << 8 | w->value[0];
-            if (cfg == 0x0001) {
-                ESP_LOGI(TAG, "Client ENABLED notifications");
-            } else {
-                ESP_LOGI(TAG, "Client DISABLED notifications");
-            }
-            // Send back a success response so the stack knows we accepted it
+            ccc_value = (w->value[1] << 8) | w->value[0];
+            ESP_LOGI(TAG, "CCC write: 0x%04x", ccc_value);
             esp_ble_gatts_send_response(
                 gatts_if,
                 w->conn_id,
@@ -169,21 +157,19 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         }
         break;
     }
-
-
     default:
         break;
     }
 }
 
-// send a BLE notification every 10 seconds
-static void ble_notify_task(void *arg)
+// Notify task: send FALL_DETECTED only when enabled
+static void notify_task(void *arg)
 {
     const char *msg = "FALL_DETECTED";
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10 * 1000));
-        if (conn_id != 0) {
-            esp_ble_gatts_send_indicate(
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        if (conn_id != 0 && (ccc_value & ESP_GATT_CLIENT_CHAR_CFG_NOTIFY)) {
+            esp_err_t err = esp_ble_gatts_send_indicate(
                 gatts_if_global,
                 conn_id,
                 handles[IDX_CHAR],
@@ -191,38 +177,38 @@ static void ble_notify_task(void *arg)
                 (uint8_t*)msg,
                 false
             );
-            ESP_LOGI(TAG, "Notified: %s", msg);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Indicate failed: %s", esp_err_to_name(err));
+            }
         }
     }
 }
 
 void app_main(void)
 {
-    // 1) initialize NVS
+    // 1) NVS init
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
 
-    // 2) init BLE controller in BLE-only mode
+    // 2) BT controller init
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
 
-    // 3) init Bluedroid
+    // 3) Bluedroid init
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-    // 4) register callbacks
+    // 4) Register callbacks
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 
-    // 5) start notify task
-    xTaskCreate(ble_notify_task, "ble_notify", 4096, NULL, 5, NULL);
+    // 5) Create notify task
+    xTaskCreate(notify_task, "notify_task", 4096, NULL, 5, NULL);
 }
