@@ -9,19 +9,19 @@
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
-#include "esp_gatt_defs.h"  // for CCC notify macro
 #include "esp_gatts_api.h"
+#include "esp_gatt_defs.h"        // for ESP_GATT_CLIENT_CHAR_CFG_NOTIFY
 #include "esp_gatt_common_api.h"
 
 #define TAG                 "BLE_FALL"
 #define DEVICE_NAME         "ESP32_C3_BLE"
 
-// 16-bit UUIDs
+// 16-bit UUIDs matching the React Native 'ff00'/'ff01'
 #define SERVICE_UUID        0xFF00
 #define CHAR_UUID           0xFF01
 static const uint16_t CLIENT_CHAR_CFG_UUID = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
-// GATT attribute handles
+// Attribute indices
 enum {
     IDX_SVC,
     IDX_CHAR,
@@ -32,9 +32,9 @@ enum {
 static uint16_t handles[IDX_NB];
 static uint16_t conn_id = 0;
 static esp_gatt_if_t gatts_if_global = 0;
-static uint16_t ccc_value = 0;  // tracks CCC descriptor writes
+static uint16_t ccc_value = 0;   // tracks CCC descriptor writes
 
-// Advertising data: include 16-bit service UUID
+// Advertising data including 16-bit service UUID
 static uint16_t adv_service_uuid = SERVICE_UUID;
 static esp_ble_adv_data_t adv_data = {
     .set_scan_rsp        = false,
@@ -44,28 +44,22 @@ static esp_ble_adv_data_t adv_data = {
     .p_service_uuid      = (uint8_t*)&adv_service_uuid,
     .flag                = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
-// Advertising parameters (100-150ms interval)
+// Advertising parameters (100-150 ms)
 static esp_ble_adv_params_t adv_params = {
-    .adv_int_min         = 0x00A0,  // 100 ms
-    .adv_int_max         = 0x00F0,  // 150 ms
+    .adv_int_min         = 0x00A0,
+    .adv_int_max         = 0x00F0,
     .adv_type            = ADV_TYPE_IND,
     .own_addr_type       = BLE_ADDR_TYPE_PUBLIC,
     .channel_map         = ADV_CHNL_ALL,
     .adv_filter_policy   = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
 
-// GAP event handler: start advertising & retry
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-    switch (event) {
-    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+// GAP event handler: start advertising when setup completes
+static void gap_event_handler(esp_gap_ble_cb_event_t event,
+                              esp_ble_gap_cb_param_t *param)
+{
+    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
         esp_ble_gap_start_advertising(&adv_params);
-        break;
-    case ESP_GAP_BLE_ADV_START_FAILED_EVT:
-        ESP_LOGW(TAG, "Adv start failed, retrying");
-        esp_ble_gap_start_advertising(&adv_params);
-        break;
-    default:
-        break;
     }
 }
 
@@ -93,7 +87,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         ESP_LOGI(TAG, "CREATE_SERVICE status=%d handle=%d", param->create.status, param->create.service_handle);
         handles[IDX_SVC] = param->create.service_handle;
 
-        // Add characteristic (READ + NOTIFY)
+        // Add characteristic: READ + NOTIFY
         esp_bt_uuid_t char_uuid = {0};
         char_uuid.len = ESP_UUID_LEN_16;
         char_uuid.uuid.uuid16 = CHAR_UUID;
@@ -102,13 +96,11 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
             &char_uuid,
             ESP_GATT_PERM_READ,
             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-            NULL,
-            NULL
-        );
+            NULL, NULL);
         break;
     }
     case ESP_GATTS_ADD_CHAR_EVT: {
-        ESP_LOGI(TAG, "ADD_CHAR status=%d attr_handle=%d", param->add_char.status, param->add_char.attr_handle);
+        ESP_LOGI(TAG, "ADD_CHAR status=%d handle=%d", param->add_char.status, param->add_char.attr_handle);
         handles[IDX_CHAR] = param->add_char.attr_handle;
 
         // Add CCC descriptor (0x2902)
@@ -119,13 +111,11 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
             handles[IDX_SVC],
             &descr_uuid,
             ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-            NULL,
-            NULL
-        );
+            NULL, NULL);
         break;
     }
     case ESP_GATTS_ADD_CHAR_DESCR_EVT: {
-        ESP_LOGI(TAG, "ADD_DESCR status=%d attr_handle=%d", param->add_char_descr.status, param->add_char_descr.attr_handle);
+        ESP_LOGI(TAG, "ADD_DESCR status=%d handle=%d", param->add_char_descr.status, param->add_char_descr.attr_handle);
         handles[IDX_CHAR_CCC] = param->add_char_descr.attr_handle;
         esp_ble_gatts_start_service(handles[IDX_SVC]);
         break;
@@ -144,17 +134,16 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         break;
     }
     case ESP_GATTS_WRITE_EVT: {
-        esp_ble_gatts_cb_param_t *w = &param->write;
-        if (w->handle == handles[IDX_CHAR_CCC] && w->len == 2) {
-            ccc_value = (w->value[1] << 8) | w->value[0];
+        // Client wrote to CCC descriptor?
+        if (param->write.handle == handles[IDX_CHAR_CCC] && param->write.len == 2) {
+            ccc_value = (param->write.value[1] << 8) | param->write.value[0];
             ESP_LOGI(TAG, "CCC write: 0x%04x", ccc_value);
             esp_ble_gatts_send_response(
                 gatts_if,
-                w->conn_id,
-                w->trans_id,
+                param->write.conn_id,
+                param->write.trans_id,
                 ESP_GATT_OK,
-                NULL
-            );
+                NULL);
         }
         break;
     }
@@ -163,7 +152,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     }
 }
 
-// Notify task: send FALL_DETECTED only when enabled
+// Notification task: only send when client enabled notifications
 static void notify_task(void *arg)
 {
     const char *msg = "FALL_DETECTED";
@@ -176,8 +165,7 @@ static void notify_task(void *arg)
                 handles[IDX_CHAR],
                 strlen(msg),
                 (uint8_t*)msg,
-                false
-            );
+                false);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Indicate failed: %s", esp_err_to_name(err));
             }
@@ -187,7 +175,7 @@ static void notify_task(void *arg)
 
 void app_main(void)
 {
-    // 1) NVS init
+    // 1) Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -195,21 +183,21 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // 2) BT controller init
+    // 2) Initialize BLE controller
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
 
-    // 3) Bluedroid init
+    // 3) Initialize Bluedroid
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-    // 4) Register callbacks
+    // 4) Register GAP and GATT callbacks
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 
-    // 5) Create notify task
+    // 5) Start the notification task
     xTaskCreate(notify_task, "notify_task", 4096, NULL, 5, NULL);
 }
