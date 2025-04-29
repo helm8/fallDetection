@@ -14,7 +14,7 @@
 #include "driver/ledc.h"
 
 
-// Bluetooth stuff commented out for now
+// Bluetooth stuff 
 
 #include "nvs_flash.h"
 #include "esp_bt.h"
@@ -115,7 +115,7 @@ static state_t current_state = CONFIGURATION_STATE;
 
 
 
-// Bluetooth stuff commented out for now
+// Bluetooth stuff 
 
 // GAP Event Handler
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
@@ -276,35 +276,49 @@ static void alarm_timer_set(unsigned char set) {
 		.callback = alarm_timer_callback,
 		.name = "alarm_timer"
 	};
-	esp_timer_handle_t alarm_timer;
+	static esp_timer_handle_t alarm_timer;
 	printf("In the alarm_timer_set function: %d\n", set);	
 	if (set) {
 		ESP_ERROR_CHECK(esp_timer_create(&alarm_timer_args, &alarm_timer));
 		if (esp_timer_is_active(alarm_timer)) {
+			printf("Restarting Timer!\n");
 			ESP_ERROR_CHECK(esp_timer_restart(alarm_timer, 5000*1000));
 		} else {
+			printf("Starting Timer!\n");
 			ESP_ERROR_CHECK(esp_timer_start_once(alarm_timer, 5000*1000));
 		}
 	} else {
-		if (esp_timer_is_active(alarm_timer)) {	
+		if (esp_timer_is_active(alarm_timer)) {
+			printf("Stopping Timer!\n");
 			ESP_ERROR_CHECK(esp_timer_stop(alarm_timer));
 		}
-	}
-	
+	}	
 }
 
 static void check_fall(void) {
 	uint16_t count;
-	uint16_t thres = 30000;
+	bool neg_flag, pos_flag;
+	uint16_t acc_thres = 3800;
+	uint16_t gyr_thres = 10000;
 	count = 0;
+	neg_flag = 0;
+	pos_flag = 0;
 	for (int i = 0; i < num_samples; i++) {
-		if (data_buffer->gyr_mag > thres) {
+		if (data_buffer->acc_mag > acc_thres && data_buffer->gyr_mag > gyr_thres) {
 			count++;
+			if ((data_buffer->acc_x > 150) || (data_buffer->acc_y > 150) || (data_buffer->acc_z > 150)) {
+				pos_flag = 1;
+			}
+			if ((data_buffer->acc_x < -150) || (data_buffer->acc_y < -150) || (data_buffer->acc_z < -150)) {
+				neg_flag = 1;
+			}
 		} else {
 			count = 0;
+			pos_flag = 0;
+			neg_flag = 0;
 		}
 
-		if (count > 3) {
+		if (count > 2 && neg_flag && pos_flag) {
 			printf("Fall Detected!!\n");
 			if (current_state == IDLE_STATE) {
 				current_state = ALARM_STATE;
@@ -370,7 +384,7 @@ static void configure_led(void) {
 		.speed_mode = LEDC_LOW_SPEED_MODE,
 		.duty_resolution = LEDC_TIMER_7_BIT,
 		.timer_num = LEDC_TIMER_0,
-		.freq_hz = 5000,
+		.freq_hz = 4000,
 		.clk_cfg = LEDC_USE_XTAL_CLK
 	};
 	ESP_ERROR_CHECK(ledc_timer_config(&spk_pwm_timer));
@@ -605,7 +619,7 @@ void app_main(void) {
 	i2c_init(&bus_handle, &dev_handle);
 	sensor_init(dev_handle);
 	
-	// Bluetooth stuff commented out for now
+	// Bluetooth stuff 
 	
 	esp_err_t ret = nvs_flash_init();
     	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -625,9 +639,7 @@ void app_main(void) {
     	ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     	ESP_ERROR_CHECK(esp_ble_gatts_app_register(0));
 
-    	// Create a task that simulates fall detection events.
-    	//xTaskCreate(fall_detection_task, "fall_detection_task", 4096, NULL, 5, NULL);
-	
+
 	
 	gpio_set_level(GPIO_BTH_STS, 0);
 	gpio_set_level(GPIO_FALL_DET, 0);
@@ -657,6 +669,12 @@ void app_main(void) {
 			ESP_ERROR_CHECK(ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0));
 			gpio_set_level(GPIO_SPK_CTRL, 0);
 			gpio_set_level(GPIO_FALL_DET, 1);
+		} else if (current_state == ERROR_STATE) {
+			printf("An error has occured!\n");
+			gpio_set_level(GPIO_BTH_STS, 0);
+			vTaskDelay(200 / portTICK_PERIOD_MS);
+			gpio_set_level(GPIO_BTH_STS, 1);
+			vTaskDelay(200 / portTICK_PERIOD_MS);
 		}
 	}
 }
