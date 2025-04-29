@@ -384,7 +384,7 @@ static void configure_led(void) {
 		.speed_mode = LEDC_LOW_SPEED_MODE,
 		.duty_resolution = LEDC_TIMER_7_BIT,
 		.timer_num = LEDC_TIMER_0,
-		.freq_hz = 4000,
+		.freq_hz = 5000,
 		.clk_cfg = LEDC_USE_XTAL_CLK
 	};
 	ESP_ERROR_CHECK(ledc_timer_config(&spk_pwm_timer));
@@ -618,6 +618,8 @@ void app_main(void) {
 	start_bluetooth_connection();
 	i2c_init(&bus_handle, &dev_handle);
 	sensor_init(dev_handle);
+	ESP_ERROR_CHECK(ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0));
+	ESP_ERROR_CHECK(ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, 4000));
 	
 	// Bluetooth stuff 
 	
